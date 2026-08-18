@@ -1,0 +1,141 @@
+name: Build VagoMp3 APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # The repository may contain the Android project directly OR as a ZIP.
+      # Detect/extract it before Gradle/Java setup so the workflow works with either layout.
+      - name: Locate and prepare VagoMp3 project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_DIR=""
+
+          if [[ -f "settings.gradle.kts" && -f "app/build.gradle.kts" ]]; then
+            PROJECT_DIR="$PWD"
+          else
+            ZIP_FILE="$(find . -maxdepth 3 -type f \
+              \( -name 'VagoMp3*.zip' -o -name 'VagoSave*.zip' \) \
+              -print -quit)"
+
+            if [[ -z "$ZIP_FILE" ]]; then
+              echo "ERROR: VagoMp3 Android layihəsi və ya VagoMp3 ZIP tapılmadı."
+              find . -maxdepth 5 -type f | sort | head -300
+              exit 1
+            fi
+
+            echo "Project ZIP: $ZIP_FILE"
+            rm -rf extracted-vagomp3
+            mkdir -p extracted-vagomp3
+            unzip -q "$ZIP_FILE" -d extracted-vagomp3
+
+            SETTINGS_FILE="$(find extracted-vagomp3 -type f -name 'settings.gradle.kts' -print -quit)"
+            if [[ -z "$SETTINGS_FILE" ]]; then
+              echo "ERROR: ZIP daxilində settings.gradle.kts tapılmadı."
+              find extracted-vagomp3 -maxdepth 6 -type f | sort
+              exit 1
+            fi
+
+            PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "VagoMp3 project: $PROJECT_DIR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          # Deliberately no Gradle cache here because the project can be extracted from a ZIP.
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          test -f settings.gradle.kts
+          test -f build.gradle.kts
+          test -f app/build.gradle.kts
+          grep -q 'com.vagomp3.app' app/build.gradle.kts
+          grep -q 'applicationId = "com.vagomp3.app"' app/build.gradle.kts
+
+          echo "Android project structure OK."
+          echo "Package: com.vagomp3.app"
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Build Release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle --no-daemon --stacktrace :app:assembleRelease
+
+      - name: Collect APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf apk-output
+          mkdir -p apk-output
+
+          DEBUG_APK="$(find "$PROJECT_DIR/app/build/outputs/apk/debug" -type f -name '*.apk' -print -quit)"
+          RELEASE_APK="$(find "$PROJECT_DIR/app/build/outputs/apk/release" -type f -name '*.apk' -print -quit)"
+
+          [[ -n "$DEBUG_APK" ]] || { echo "ERROR: Debug APK yaradılmadı."; exit 1; }
+          [[ -n "$RELEASE_APK" ]] || { echo "ERROR: Release APK yaradılmadı."; exit 1; }
+
+          cp "$DEBUG_APK" apk-output/VagoMp3-debug.apk
+          cp "$RELEASE_APK" apk-output/VagoMp3-release.apk
+
+          ls -lh apk-output/
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: VagoMp3-APKs
+          path: apk-output/*.apk
+          if-no-files-found: error
+          retention-days: 14
